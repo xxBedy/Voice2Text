@@ -1,0 +1,9 @@
+.superpowers/
+docs/superpowers/
+.DS_Store
+.venv/
+build/
+dist/
+__pycache__/
+*.m4a
+!tests/fixtures/*.m4a

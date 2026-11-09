@@ -1,0 +1,276 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  # Pushes to main and pull requests: tests only.
+  test:
+    name: Tests (${{ matrix.os }})
+    if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Install dependencies
+        shell: bash
+        run: uv sync --frozen
+
+      - name: Tests
+        shell: bash
+        run: uv run pytest -v
+
+  # Tags and manual runs: tests, build, smoke tests, installers (and a release on tags).
+  build:
+    name: Build (${{ matrix.os }})
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    env:
+      VOICE2TEXT_WHISPER_MODEL: tiny
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Install dependencies
+        shell: bash
+        run: uv sync --frozen
+
+      - name: Resolve version (must match tag on tag builds)
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(uv run python -c 'import voice2text; print(voice2text.__version__)')"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ] && [ "${GITHUB_REF_NAME#v}" != "$VERSION" ]; then
+            echo "Tag ${GITHUB_REF_NAME} does not match voice2text.__version__ ${VERSION}" >&2
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Tests
+        shell: bash
+        run: uv run pytest -v
+
+      - name: Build with PyInstaller
+        shell: bash
+        run: uv run pyinstaller packaging/voice2text.spec --noconfirm
+
+      # Smoke tests run a realistic path: app data and the recording in folders with
+      # diacritics and spaces, the job in a spawned worker (as the window runs it) with
+      # speakers on, and the window itself opening and closing.
+      - name: Smoke test - transcribe (macOS)
+        if: runner.os == 'macOS'
+        timeout-minutes: 20
+        env:
+          VOICE2TEXT_HOME: ${{ runner.temp }}/Uživatel ěščř/v2t
+          VOICE2TEXT_UI_LANG: cs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$VOICE2TEXT_HOME" "smoke/Porady ěščř"
+          cp tests/fixtures/cs_sample.m4a "smoke/Porady ěščř/ukázka porady.m4a"
+          dist/Voice2Text.app/Contents/MacOS/Voice2Text --transcribe "smoke/Porady ěščř/ukázka porady.m4a" --format txt --language cs
+          test -s "smoke/Porady ěščř/ukázka porady.txt"
+
+      - name: Smoke test - spawned worker with speakers (macOS)
+        if: runner.os == 'macOS'
+        timeout-minutes: 15
+        env:
+          VOICE2TEXT_HOME: ${{ runner.temp }}/Uživatel ěščř/v2t
+          VOICE2TEXT_UI_LANG: cs
+          VOICE2TEXT_CLI_SPAWN: "1"
+        shell: bash
+        run: |
+          set -euo pipefail
+          dist/Voice2Text.app/Contents/MacOS/Voice2Text --transcribe "smoke/Porady ěščř/ukázka porady.m4a" --format md --speakers --language cs
+          test -s "smoke/Porady ěščř/ukázka porady.md"
+          grep -q "Mluvčí" "smoke/Porady ěščř/ukázka porady.md"
+
+      - name: Smoke test - English UI speaker labels (macOS)
+        if: runner.os == 'macOS'
+        timeout-minutes: 15
+        env:
+          VOICE2TEXT_HOME: ${{ runner.temp }}/Uživatel ěščř/v2t
+          VOICE2TEXT_UI_LANG: en
+          VOICE2TEXT_CLI_SPAWN: "1"
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp "smoke/Porady ěščř/ukázka porady.m4a" "smoke/Porady ěščř/english ui.m4a"
+          dist/Voice2Text.app/Contents/MacOS/Voice2Text --transcribe "smoke/Porady ěščř/english ui.m4a" --format md --speakers --language cs
+          grep -q "Speaker 1:" "smoke/Porady ěščř/english ui.md"
+
+      - name: Smoke test - window opens and quits (macOS)
+        if: runner.os == 'macOS'
+        timeout-minutes: 5
+        env:
+          VOICE2TEXT_HOME: ${{ runner.temp }}/Uživatel ěščř/v2t
+          VOICE2TEXT_SMOKE_QUIT_MS: "3000"
+        shell: bash
+        run: dist/Voice2Text.app/Contents/MacOS/Voice2Text
+
+      - name: Smoke test - transcribe (Windows)
+        if: runner.os == 'Windows'
+        timeout-minutes: 20
+        env:
+          VOICE2TEXT_HOME: ${{ runner.temp }}\Uživatel ěščř\v2t
+          VOICE2TEXT_UI_LANG: cs
+        shell: pwsh
+        run: |
+          $work = Join-Path $PWD "smoke\Porady ěščř"
+          New-Item -ItemType Directory -Force -Path $env:VOICE2TEXT_HOME, $work | Out-Null
+          $audio = Join-Path $work "ukázka porady.m4a"
+          Copy-Item tests\fixtures\cs_sample.m4a $audio
+          $p = Start-Process -FilePath "dist\Voice2Text\Voice2Text.exe" `
+            -ArgumentList "--transcribe `"$audio`" --format txt --language cs" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "Voice2Text exited with $($p.ExitCode)" }
+          $out = Join-Path $work "ukázka porady.txt"
+          if (-not (Test-Path -LiteralPath $out)) { throw "Transcript $out was not created" }
+
+      - name: Smoke test - spawned worker with speakers (Windows)
+        if: runner.os == 'Windows'
+        timeout-minutes: 15
+        env:
+          VOICE2TEXT_HOME: ${{ runner.temp }}\Uživatel ěščř\v2t
+          VOICE2TEXT_UI_LANG: cs
+          VOICE2TEXT_CLI_SPAWN: "1"
+        shell: pwsh
+        run: |
+          $work = Join-Path $PWD "smoke\Porady ěščř"
+          $audio = Join-Path $work "ukázka porady.m4a"
+          $p = Start-Process -FilePath "dist\Voice2Text\Voice2Text.exe" `
+            -ArgumentList "--transcribe `"$audio`" --format md --speakers --language cs" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "Voice2Text exited with $($p.ExitCode)" }
+          $out = Join-Path $work "ukázka porady.md"
+          if (-not (Test-Path -LiteralPath $out)) { throw "Transcript $out was not created" }
+          if (-not (Select-String -LiteralPath $out -Pattern "Mluvčí" -Quiet)) { throw "No speaker labels in $out" }
+
+      - name: Smoke test - English UI speaker labels (Windows)
+        if: runner.os == 'Windows'
+        timeout-minutes: 15
+        env:
+          VOICE2TEXT_HOME: ${{ runner.temp }}\Uživatel ěščř\v2t
+          VOICE2TEXT_UI_LANG: en
+          VOICE2TEXT_CLI_SPAWN: "1"
+        shell: pwsh
+        run: |
+          $work = Join-Path $PWD "smoke\Porady ěščř"
+          $audio = Join-Path $work "english ui.m4a"
+          Copy-Item (Join-Path $work "ukázka porady.m4a") $audio
+          $p = Start-Process -FilePath "dist\Voice2Text\Voice2Text.exe" `
+            -ArgumentList "--transcribe `"$audio`" --format md --speakers --language cs" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "Voice2Text exited with $($p.ExitCode)" }
+          $out = Join-Path $work "english ui.md"
+          if (-not (Test-Path -LiteralPath $out)) { throw "Transcript $out was not created" }
+          if (-not (Select-String -LiteralPath $out -Pattern "Speaker 1:" -Quiet)) { throw "No English speaker labels in $out" }
+
+      - name: Print detected CPU thread count (Windows)
+        if: runner.os == 'Windows'
+        env:
+          V2T_LOGS: ${{ runner.temp }}\Uživatel ěščř\v2t\logs
+        shell: pwsh
+        run: |
+          $lines = @()
+          if (Test-Path -LiteralPath $env:V2T_LOGS) {
+            $lines = @(Get-ChildItem -LiteralPath $env:V2T_LOGS -Filter *.log |
+              Select-String -Pattern "cpu_threads=" | ForEach-Object { $_.Line })
+          }
+          if ($lines.Count -gt 0) { $lines | ForEach-Object { Write-Output $_ } }
+          else { Write-Output "No cpu_threads line found in logs under $env:V2T_LOGS" }
+
+      - name: Smoke test - window opens and quits (Windows)
+        if: runner.os == 'Windows'
+        timeout-minutes: 5
+        env:
+          VOICE2TEXT_HOME: ${{ runner.temp }}\Uživatel ěščř\v2t
+          VOICE2TEXT_SMOKE_QUIT_MS: "3000"
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath "dist\Voice2Text\Voice2Text.exe" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "Voice2Text window exited with $($p.ExitCode)" }
+
+      - name: Show app logs
+        if: failure()
+        env:
+          V2T_LOGS: ${{ runner.temp }}/Uživatel ěščř/v2t/logs
+        shell: pwsh
+        run: |
+          if (Test-Path -LiteralPath $env:V2T_LOGS) {
+            Get-ChildItem -LiteralPath $env:V2T_LOGS -Filter *.log | ForEach-Object {
+              Write-Output "===== $($_.FullName)"
+              Get-Content -LiteralPath $_.FullName -Encoding utf8
+            }
+          } else { Write-Output "no logs at $env:V2T_LOGS" }
+
+      - name: Package dmg (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: packaging/macos/build_dmg.sh "${{ steps.version.outputs.version }}"
+
+      - name: Package installer (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup -y --no-progress
+          }
+          if (-not (Test-Path $iscc)) { throw "ISCC.exe not found at $iscc" }
+          & $iscc "/DMyAppVersion=${{ steps.version.outputs.version }}" "packaging\windows\installer.iss"
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
+          if (-not (Test-Path "dist\Voice2Text-Setup-${{ steps.version.outputs.version }}.exe")) { throw "Setup exe missing" }
+
+      - name: Upload artifact (macOS)
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Voice2Text-macos
+          path: dist/Voice2Text-${{ steps.version.outputs.version }}.dmg
+          if-no-files-found: error
+
+      - name: Upload artifact (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Voice2Text-windows
+          path: dist/Voice2Text-Setup-${{ steps.version.outputs.version }}.exe
+          if-no-files-found: error
+
+  release:
+    name: Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-files
+          merge-multiple: true
+
+      - name: List files
+        shell: bash
+        run: ls -l release-files
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release-files/*.dmg
+            release-files/*.exe
+          fail_on_unmatched_files: true
