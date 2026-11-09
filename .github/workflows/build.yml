@@ -18,9 +18,9 @@ jobs:
       matrix:
         os: [windows-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@v10.3.3
 
       - name: Install dependencies
         shell: bash
@@ -42,9 +42,9 @@ jobs:
     env:
       VOICE2TEXT_WHISPER_MODEL: tiny
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@v10.3.3
 
       - name: Install dependencies
         shell: bash
@@ -237,7 +237,7 @@ jobs:
 
       - name: Upload artifact (macOS)
         if: runner.os == 'macOS'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: Voice2Text-macos
           path: dist/Voice2Text-${{ steps.version.outputs.version }}.dmg
@@ -245,7 +245,7 @@ jobs:
 
       - name: Upload artifact (Windows)
         if: runner.os == 'Windows'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: Voice2Text-windows
           path: dist/Voice2Text-Setup-${{ steps.version.outputs.version }}.exe
@@ -259,7 +259,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: release-files
           merge-multiple: true
@@ -268,7 +268,7 @@ jobs:
         shell: bash
         run: ls -l release-files
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: |
             release-files/*.dmg
